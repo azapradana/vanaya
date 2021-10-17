@@ -1,0 +1,722 @@
+<apex:page standardController="Project__c">
+    <div id="vny_message">Processing...</div>
+    <script src="https://code.jquery.com/jquery-3.5.1.js"></script>
+    <script src="../../soap/ajax/51.0/connection.js" type="text/javascript"></script>
+    <script>
+        $(document).ready(function(){
+            sforce.connection.sessionId = '{!GETSESSIONID()}';
+            var data = {};
+            var productsToInsert = [];
+            var participantsToInsert = [];
+            var updateParticipant = [];
+            var updateCustomer = [];
+            $('#vny_message').html('Fetching Project...');
+            data.project = {};
+            data.project.Id = '{!Project__c.Id}';
+            data.project.Number = '{!Project__c.Name}';
+            data.project.Amount = '{!Project__c.Project_Values_New__c}';
+            data.project.Opportunity = '{!Project__c.Opportunity__c}';
+            data.project.Status = '{!Project__c.Status__c}';
+            data.project.Type = '{!Project__c.Record_Type__c}';
+            data.project.Synced = '{!Project__c.Synced_To_Quickbooks__c}';
+            console.log('dataproj',data.project);
+            
+            if(data.project.Status != 'In Progress') {
+                $('#vny_message').html($('#vny_message').html()+'<br>Sync to Quickbooks only available on Project Status: In Progress');
+                return false;
+            }
+            if(data.project.Synced == 'true') {
+                $('#vny_message').html($('#vny_message').html()+'<br>This Project has already synced to Quickbooks. try to sync remaining participant');
+                //return false;
+            }
+            
+            $('#vny_message').html($('#vny_message').html()+'<br>Fetching Customer...');
+            data.customer = getProjectCustomer();
+            
+            if(data.project.Type == 'Project') {
+                $('#vny_message').html($('#vny_message').html()+'<br>Fetching Contact...');
+                data.contact = getProjectContact();
+            } else if(data.project.Type == 'Event') {
+                $('#vny_message').html($('#vny_message').html()+'<br>Fetching Participants...');
+                data.participants = getProjectParticipants();
+            }
+            
+            data.product = getProjectProduct();
+            console.log('product:',data.product);
+            
+            if("Id" in data.product) {
+                $('#vny_message').html($('#vny_message').html()+'<br>Getting token...');
+                var qryToken = sforce.connection.query("SELECT Id, Name, Value__c FROM Config__c WHERE Name='RefreshToken'");
+                var recToken = qryToken.getArray("records");
+                var qryRealm = sforce.connection.query("SELECT Id, Name, Value__c FROM Config__c WHERE Name='CompanyId'");
+                var recRealm = qryRealm.getArray("records");
+                $.ajax({
+                    url: "https://vanaya.my.id/v/token?refresh_token="+recToken[0].Value__c,
+                    success: function(result){
+                        console.log('result',result);
+                        if(result.error) {
+                            $('#vny_message').html('Quickbooks API session ended, please authenticate <a href="https://vanaya.my.id/vanaya" target="_blank">here</a>');
+                        } else {
+                            if(recToken[0].Value__c != result.refresh_token) {
+                                console.log('Updating the refresh token.');
+                                var config = new sforce.SObject("Config__c");
+                                config.Id = recToken[0].Id;
+                                config.Value__c = result.refresh_token;
+                                var resConfig = sforce.connection.update([config]);
+                                if (resConfig[0].getBoolean("success")) {
+                                    console.log('Update refresh token success');
+                                } else {
+                                    console.log('Update refresh token failed');
+                                }
+                            } else {
+                                console.log('No need to update refresh token');
+                            }
+                            console.log('Access token is: '+result.access_token);
+                            //getCompanyInfo(result.access_token);
+                            insertCustomer(result.access_token);
+                        }
+                    }
+                });
+            }
+                
+            /*
+            var lineItems = {};
+            
+            $('#vny_message').html($('#vny_message').html()+'<br>Fetching Products...');
+            var qryProducts = sforce.connection.query("SELECT Id, OpportunityId, Product2Id, Product2.Name, Product2.QB_ID__c, Quantity, UnitPrice FROM OpportunityLineItem WHERE OpportunityId='"+data.project.Opportunity+"'");
+            var recProducts = qryProducts.getArray("records");
+            recProducts.forEach(function(record,index){
+                console.log(record);
+                if(record.Product2.QB_ID__c == null) {
+                    var objProduct = {};
+                    objProduct.bId = 'bid'+(index+1);
+                    objProduct.Item = {};
+                    objProduct.Item.Name = record.Product2.Name;
+                    objProduct.Item.Type = 'Service';
+                    objProduct.Item.Description = record.Product2Id;
+                    objProduct.Item.UnitPrice = Number(record.UnitPrice);
+                    objProduct.Item.IncomeAccountRef = {};
+                    objProduct.Item.IncomeAccountRef.name = 'Sales';
+                    objProduct.Item.IncomeAccountRef.value = '26';
+                    objProduct.operation = 'create';
+                    productsToInsert.push(objProduct);
+                }
+                lineItems[record.Product2.Name] = {
+                    quantity: record.Quantity,
+                    price: Number(record.UnitPrice),
+                    id: record.Product2.QB_ID__c
+                }
+            });
+            console.log('productsToInsert',productsToInsert);
+            console.log('lineItems',lineItems);
+            */
+              
+            function validURL(str) {
+              var pattern = new RegExp('^(https?:\\/\\/)?'+ // protocol
+                '((([a-z\\d]([a-z\\d-]*[a-z\\d])*)\\.)+[a-z]{2,}|'+ // domain name
+                '((\\d{1,3}\\.){3}\\d{1,3}))'+ // OR ip (v4) address
+                '(\\:\\d+)?(\\/[-a-z\\d%_.~+]*)*'+ // port and path
+                '(\\?[;&a-z\\d%_.~+=-]*)?'+ // query string
+                '(\\#[-a-z\\d_]*)?$','i'); // fragment locator
+              return !!pattern.test(str);
+            }  
+              
+            function insertCustomer(token) {
+                if(data.customer.QbId == "") {
+                    $('#vny_message').html($('#vny_message').html()+'<br>Checking Customer on Quickbooks...');
+                    $.ajax({
+                        url: "https://vanaya.my.id/v/query",
+                        method: 'POST',
+                        crossDomain: true,
+                        xhrFields: { withCredentials:true },
+                        contentType: "application/json",
+                        data: JSON.stringify({
+                            token: token,
+                            realmId: recRealm[0].Value__c,
+                            strQuery: "select * from Customer where DisplayName='"+data.customer.Name+"'"
+                        }),
+                        success: function(result){
+                            console.log('res cust',result);
+                            if("Customer" in result.QueryResponse) {
+                                var cust = result.QueryResponse.Customer[0];
+                                var account = new sforce.SObject("Account");
+                                account.Id = data.customer.Id;
+                                account.QB_ID__c = cust.Id;
+                                account.QB_Sync_Token__c = cust.SyncToken;
+                                sforce.connection.update([account]);
+                                if(data.project.Type == 'Project') insertContact(token,cust.Id);
+                                if(data.project.Type == 'Event') insertParticipants(token,cust.Id);
+                            } else {
+                                $('#vny_message').html($('#vny_message').html()+'<br>Creating Customer on Quickbooks...');
+                                var dataCust = {};
+                                if(data.project.Type == 'Project') dataCust = {
+                                    DisplayName: data.customer.Name,
+                                    PrimaryPhone: {FreeFormNumber: data.customer.Phone}, 
+                                    WebAddr: {URI: data.customer.Website},
+                                    BillAddr: {
+                                        Line1: data.customer.Address.Street,
+                                        City: data.customer.Address.City,
+                                        PostalCode: data.customer.Address.PostalCode
+                                    },
+                                    Notes: data.customer.Id
+                                }; 
+                                if(data.customer.Website != '' && data.customer.Website.indexOf('http') == -1) data.customer.Website = 'https://'+data.customer.Website;
+                                if(validURL(data.customer.Website) && data.project.Type == 'Project') dataCust.WebAddr.URI = data.customer.Website;
+                                else if(data.project.Type == 'Event') dataCust = {
+                                    DisplayName: data.customer.Name,
+                                    Notes: data.customer.Id
+                                };
+                                $.ajax({
+                                    url: "https://vanaya.my.id/v/create",
+                                    method: 'POST',
+                                    crossDomain: true,
+                                    xhrFields: { withCredentials:true },
+                                    contentType: "application/json",
+                                    data: JSON.stringify({
+                                        token: token,
+                                        realmId: recRealm[0].Value__c,
+                                        objectType: 'customer',
+                                        data: dataCust
+                                    }),
+                                    success: function(result){
+                                        console.log('result',result);
+                                        if("Customer" in result) {
+                                            $('#vny_message').html($('#vny_message').html()+'<br>Successfully created a Customer on Quickbooks');
+                                            var account = new sforce.SObject("Account");
+                                            account.Id = data.customer.Id;
+                                            account.QB_ID__c = result.Customer.Id;
+                                            account.QB_Sync_Token__c = result.Customer.SyncToken;
+                                            sforce.connection.update([account]);
+                                            if(data.project.Type == 'Project') insertContact(token,result.Customer.Id);
+                                            if(data.project.Type == 'Event') insertParticipants(token,result.Customer.Id);
+                                        } else {
+                                            $('#vny_message').html($('#vny_message').html()+'<br>Failed to create a Customer on Quickbooks');
+                                        }
+                                    },
+                                    error: function(error) {
+                                        console.log('error', error);
+                                    }
+                                });
+                            }
+                        },
+                        error: function(error) {
+                            console.log('error', error);
+                            $('#vny_message').html($('#vny_message').html()+'<br>Failed to get Customer on Quickbooks.');
+                        }
+                    });
+                }
+                else {
+                    $('#vny_message').html($('#vny_message').html()+'<br>Customer already synced.');
+                    if(data.project.Type == 'Project') insertContact(token,data.customer.QbId);
+                    if(data.project.Type == 'Event') insertParticipants(token,data.customer.QbId);
+                }
+            }
+            
+            function insertContact(token,parentId) {
+                if(data.contact.QbId == "") {
+                    $('#vny_message').html($('#vny_message').html()+'<br>Creating Contact on Quickbooks...');
+                    var dataCust = {
+                        DisplayName: data.contact.Name,
+                        PrimaryPhone: {FreeFormNumber: data.contact.MobilePhone},
+                        ParentRef: {value:parentId},
+                        Job: true,
+                        BillAddr: {
+                            Line1: data.contact.Address.Street,
+                            City: data.contact.Address.City,
+                            PostalCode: data.contact.Address.PostalCode
+                        },
+                        Notes: data.contact.Id
+                    };
+                    $.ajax({
+                        url: "https://vanaya.my.id/v/create",
+                        method: 'POST',
+                        crossDomain: true,
+                        xhrFields: { withCredentials:true },
+                        contentType: "application/json",
+                        data: JSON.stringify({
+                            token: token,
+                            realmId: recRealm[0].Value__c,
+                            objectType: 'customer',
+                            data: dataCust
+                        }),
+                        success: function(result){
+                            console.log(result);
+                            if("Customer" in result) {
+                                $('#vny_message').html($('#vny_message').html()+'<br>Successfully created a Contact on Quickbooks');
+                                var contact = new sforce.SObject("Contact");
+                                contact.Id = data.contact.Id;
+                                contact.QB_ID__c = result.Customer.Id;
+                                contact.QB_Sync_Token__c = result.Customer.SyncToken;
+                                sforce.connection.update([contact]);
+                                //insertProducts(token,result.Customer.Id);
+                                checkProduct(token,result.Customer.Id);
+                            } else {
+                                $('#vny_message').html($('#vny_message').html()+'<br>Failed to create a Contact on Quickbooks');
+                            }
+                            
+                        },
+                        error: function(error) {
+                            console.log('error', error);
+                        }
+                    });
+                } else {
+                    $('#vny_message').html($('#vny_message').html()+'<br>Contact already synced.');
+                    checkProduct(token,data.contact.QbId);
+                }
+            }
+            
+            function insertParticipants(token,parentId){
+                var dataParticipants = [];
+                data.participants.forEach(function(record,index){
+                    if(record.QbId == null) {
+                        var objParticipant = {
+                            bId: 'bid'+(index+1),
+                            Customer: {
+                                DisplayName: record.Name,
+                                PrimaryPhone: {FreeFormNumber: record.Phone},
+                                ParentRef: {value:parentId},
+                                Job: true,
+                                BillAddr: {
+                                    Line1: record.Address.Street,
+                                    City: record.Address.City,
+                                    PostalCode: record.Address.PostalCode
+                                },
+                                Notes: record.Id
+                            },
+                            operation: 'create'
+                        }
+                        participantsToInsert.push(objParticipant);
+                        
+                        var participant = new sforce.SObject("Participant__c");
+                        participant.Id = record.Id;
+                        participant.Sync_to_QB__c = true;
+                        updateParticipant.push(participant);
+                    }
+                });
+                if(participantsToInsert.length > 0) {
+                    $('#vny_message').html($('#vny_message').html()+'<br>Creating Participants on Quickbooks...');
+                    $.ajax({
+                        url: "https://vanaya.my.id/v/create",
+                        method: 'POST',
+                        crossDomain: true,
+                        xhrFields: { withCredentials:true },
+                        contentType: "application/json",
+                        data: JSON.stringify({
+                            token: token,
+                            realmId: recRealm[0].Value__c,
+                            objectType: 'batch',
+                            data: {
+                                BatchItemRequest: participantsToInsert
+                            }
+                        }),
+                        success: function(result){
+                            console.log('result batch participants',result);
+                            if(result.BatchItemResponse.length > 0) {
+                                result.BatchItemResponse.forEach(function(batch){
+                                    if("Customer" in batch) {
+                                        var contact = new sforce.SObject("Contact");
+                                        contact.Id = batch.Customer.Notes;
+                                        contact.QB_ID__c = batch.Customer.Id;
+                                        contact.QB_Sync_Token__c = batch.Customer.SyncToken;
+                                        sforce.connection.update([contact]);
+                                        console.log('Update contact success.');
+                                    }
+                                });
+                                checkProduct(token,'');
+                            }
+                        },
+                        error: function(error) {
+                            console.log('error', error);
+                        }
+                    });
+                } else {
+                    $('#vny_message').html($('#vny_message').html()+'<br>All the participants already synced.');
+                    checkProduct(token,'');
+                }
+                
+                if(updateParticipant.length > 0) {
+                    sforce.connection.update(updateParticipant);
+                    $('#vny_message').html($('#vny_message').html()+'<br>Participants synced ...');
+                }
+            }
+            
+            function insertProducts(token,customerId) {
+                if(productsToInsert.length > 0) {
+                    $('#vny_message').html($('#vny_message').html()+'<br>Creating Products on Quickbooks...');
+                    $.ajax({
+                        url: "https://vanaya.my.id/v/create",
+                        method: 'POST',
+                        crossDomain: true,
+                        xhrFields: { withCredentials:true },
+                        contentType: "application/json",
+                        data: JSON.stringify({
+                            token: token,
+                            realmId: recRealm[0].Value__c,
+                            objectType: 'batch',
+                            data: {
+                                BatchItemRequest: productsToInsert
+                            }
+                        }),
+                        success: function(result){
+                            console.log('result batch products',result);
+                            if(result.BatchItemResponse.length > 0) {
+                                result.BatchItemResponse.forEach(function(batch){
+                                    if("Item" in batch) {
+                                        var product = new sforce.SObject("Product2");
+                                        product.Id = batch.Item.Description;
+                                        product.QB_ID__c = batch.Item.Id;
+                                        product.QB_Sync_Token__c = batch.Item.SyncToken;
+                                        sforce.connection.update([product]);
+                                        console.log('Update product success.');
+                                        lineItems[batch.Item.Name].id = batch.Item.Id;
+                                    } else {
+                                        $('#vny_message').html($('#vny_message').html()+'<br>Failed to create Products on Quickbooks');
+                                    }
+                                });
+                                if(data.project.Type == 'Project') insertEstimateProject(token,customerId);
+                            }
+                        },
+                        error: function(error) {
+                            console.log('error', error);
+                        }
+                    });
+                } else {
+                    $('#vny_message').html($('#vny_message').html()+'<br>Selected products already synced.');
+                    if(data.project.Type == 'Project') insertEstimateProject(token,customerId);
+                }
+                console.log('line items after product insert', lineItems);
+            }
+            
+            function insertEstimateEvent(token,productId) {
+                data.participants = getProjectParticipants();
+                if(data.participants.length > 0) {
+                    $('#vny_message').html($('#vny_message').html()+'<br>Creating Estimates on Quickbooks...');
+                    var estimatesToInsert = [];
+                    data.participants.forEach(function(participant,index){
+                        var dataLines = [{
+                            DetailType: 'SalesItemLineDetail', 
+                            SalesItemLineDetail: {
+                                Qty: 1, 
+                                ItemRef: { value: productId }
+                            }, 
+                            LineNum: 1,
+                            Amount: participant.Amount
+                        }];
+                        var objEstimate = {
+                            bId: 'bid'+(index+1),
+                            Estimate: {
+                                PrivateNote: data.project.Number,
+                                GlobalTaxCalculation:'NotApplicable',
+                                BillEmail: {Address: participant.Email},
+                                CustomerRef:{value:participant.QbId},
+                                Line: dataLines,
+                                EmailStatus: 'NotSet',
+                                CustomField: [{
+                                    DefinitionId: "1",
+                                    StringValue: data.project.Id,
+                                    Name: "SalesforceID",
+                                    Type: "StringType"
+                                }]
+                            },
+                            operation: 'create'
+                        };
+                        estimatesToInsert.push(objEstimate);
+                    });
+                    $.ajax({
+                        url: "https://vanaya.my.id/v/create",
+                        method: 'POST',
+                        crossDomain: true,
+                        xhrFields: { withCredentials:true },
+                        contentType: "application/json",
+                        data: JSON.stringify({
+                            token: token,
+                            realmId: recRealm[0].Value__c,
+                            objectType: 'batch',
+                            data: {
+                                BatchItemRequest: estimatesToInsert
+                            }
+                        }),
+                        success: function(result){
+                            console.log('result batch estimates',result);
+                            if(result.BatchItemResponse.length > 0) {
+                                result.BatchItemResponse.forEach(function(batch){
+                                    
+                                });
+                                $('#vny_message').html($('#vny_message').html()+'<br>Successfully created Estimates on Quickbooks');
+                                updateProjectSynced();
+                            }
+                        },
+                        error: function(error) {
+                            console.log('error', error);
+                        }
+                    });
+                } else {
+                    $('#vny_message').html($('#vny_message').html()+'<br>Please add Participant to the Project.');
+                }
+            }
+            
+            function insertEstimateProject(token,customerId,productId) {
+                $('#vny_message').html($('#vny_message').html()+'<br>Creating Estimate on Quickbooks...');
+                var dataLines = [];
+                dataLines.push({
+                    DetailType: 'SalesItemLineDetail', 
+                    SalesItemLineDetail: {
+                        Qty: data.product.Quantity, 
+                        ItemRef: { value: productId }
+                    }, 
+                    LineNum: 1,
+                    Amount: data.product.Price
+                });
+                var dataEstimate = {
+                    CustomerRef:{value:customerId},
+                    GlobalTaxCalculation:'NotApplicable',
+                    PrivateNote: data.project.Number,
+                    BillEmail: {Address: data.contact.Email},
+                    Line: dataLines,
+                    EmailStatus: 'NotSet',
+                    CustomField: [{
+                        DefinitionId: "1",
+                        StringValue: data.project.Id,
+                        Name: "SalesforceID",
+                        Type: "StringType"
+                    }]
+                }
+                $.ajax({
+                    url: "https://vanaya.my.id/v/create",
+                    method: 'POST',
+                    crossDomain: true,
+                    xhrFields: { withCredentials:true },
+                    contentType: "application/json",
+                    data: JSON.stringify({
+                        token: token,
+                        realmId: recRealm[0].Value__c,
+                        objectType: 'estimate',
+                        data: dataEstimate
+                    }),
+                    success: function(result){
+                        console.log(result);
+                        if("Estimate" in result) {
+                            $('#vny_message').html($('#vny_message').html()+'<br>Successfully created an Estimate on Quickbooks');
+                            updateProjectSynced();
+                            /*var contact = new sforce.SObject("Contact");
+                            contact.Id = data.contact.Id;
+                            contact.QB_ID__c = result.Customer.Id;
+                            contact.QB_Sync_Token__c = result.Customer.SyncToken;
+                            sforce.connection.update([contact]);
+                            insertProducts(token,result.Customer.Id);*/
+                        } else {
+                            $('#vny_message').html($('#vny_message').html()+'<br>Failed to create an Estimate on Quickbooks');
+                        }
+                    },
+                    error: function(error) {
+                        console.log('error', error);
+                    }
+                });
+            }
+            
+            function updateProjectSynced() {
+                var updproj = new sforce.SObject("Project__c");
+                updproj.Id = data.project.Id;
+                updproj.Synced_To_Quickbooks__c = true;
+                sforce.connection.update([updproj]);
+            }
+            
+            function checkProduct(token,customerId) {
+                $('#vny_message').html($('#vny_message').html()+'<br>Checking Product on Quickbooks...');
+                $.ajax({
+                    url: "https://vanaya.my.id/v/query",
+                    method: 'POST',
+                    crossDomain: true,
+                    xhrFields: { withCredentials:true },
+                    contentType: "application/json",
+                    data: JSON.stringify({
+                        token: token,
+                        realmId: recRealm[0].Value__c,
+                        strQuery: "select * from Item where Name='"+data.product.Name+"'"
+                    }),
+                    success: function(result){
+                        console.log('qb product:',result);
+                        if("Item" in result.QueryResponse) {
+                            var product = result.QueryResponse.Item[0];
+                            if(data.project.Type == 'Project') insertEstimateProject(token,customerId,product.Id);
+                            else if(data.project.Type == 'Event') insertEstimateEvent(token,product.Id);
+                        } else {
+                            $('#vny_message').html($('#vny_message').html()+'<br>Selected Product is not found on Quickbooks.');
+                        }
+                    },
+                    error: function(error) {
+                        console.log('error', error);
+                        $('#vny_message').html($('#vny_message').html()+'<br>Failed to get Product on Quickbooks.');
+                    }
+                });
+            }
+            
+            function getProjectCustomer() {
+                var customer = {};
+                customer.Id = '{!Project__c.Customer__c}';
+                customer.Name = '{!Project__c.Customer__r.Name}';
+                customer.Phone = '{!Project__c.Customer__r.Phone}';
+                customer.Website = '{!Project__c.Customer__r.Website}';
+                customer.Address = {};
+                customer.Address.Street = '{!Project__c.Customer__r.BillingStreet}';
+                customer.Address.City = '{!Project__c.Customer__r.BillingCity}';
+                customer.Address.PostalCode = '{!Project__c.Customer__r.BillingPostalCode}';
+                customer.QbId = '{!Project__c.Customer__r.QB_ID__c}';
+                return customer;
+            }
+            
+            function getProjectContact() {
+                var contact = {};
+                contact.Id = '{!Project__c.Contact__c}';
+                contact.Name = '{!Project__c.Contact__r.Name}';
+                contact.Phone = '{!Project__c.Contact__r.MobilePhone}';
+                contact.Email = '{!Project__c.Contact__r.Email}';
+                contact.Address = {};
+                contact.Address.Street = '{!Project__c.Contact__r.MailingStreet}';
+                contact.Address.City = '{!Project__c.Contact__r.MailingCity}';
+                contact.Address.PostalCode = '{!Project__c.Contact__r.MailingPostalCode}';
+                contact.QbId = '{!Project__c.Contact__r.QB_ID__c}';
+                return contact;
+            }
+            
+            function getProjectParticipants() {
+                var qryParticipants = sforce.connection.query("SELECT Id, Amount__c, Contact__c, Contact__r.Name, Contact__r.Email, Contact__r.MobilePhone, Contact__r.MailingStreet, Contact__r.MailingCity, Contact__r.MailingPostalCode, Contact__r.QB_ID__c,Company__c,Company__r.Name,Company__r.phone,Company__r.BillingAddress,Company__r.QB_ID__c,Paticipant_Type__c,Sync_to_QB__c FROM Participant__c WHERE Sync_to_QB__c = FALSE AND Project__c='"+data.project.Id+"'");
+                var recParticipants = qryParticipants.getArray("records");
+                var participants = [];
+                recParticipants.forEach(function(record,index){
+                    console.log('contact id :'+record.id);
+                    console.log('type :'+record.Paticipant_Type__c);
+                    var participant = {};
+                    var objParticipant = {};
+                    
+                    if(record.Paticipant_Type__c == 'Company'){
+                     participant.Id = record.Company__c;
+                     participant.Name = record.Company__r.Name;
+                     participant.Phone = record.Company__r.phone;
+                     participant.QbId = record.Company__r.QB_ID__c;
+                    }else if(record.Paticipant_Type__c == 'Personal'){
+                     participant.Id = record.Contact__c;
+                     participant.Name = record.Contact__r.Name;
+                     participant.Phone = record.Contact__r.MobilePhone;
+                     participant.Email = record.Contact__r.Email;
+                     if(data.project.Type == 'Project'){
+                      participant.Address.Street = record.Contact__r.MailingStreet;
+                      participant.Address.City = record.Contact__r.MailingCity;
+                      participant.Address.PostalCode = record.Contact__r.MailingPostalCode;
+                     }
+                     participant.QbId = record.Contact__r.QB_ID__c;
+                    }
+                    participant.CompanyParticipant = record.Company_Participant__c;
+                    participant.Address = {};
+                    participant.Amount = record.Amount__c;
+                    participants.push(participant);
+                });
+                console.log('participants',participants);
+                return participants;
+            }
+            
+            function getProjectProduct() {
+                var product = {};
+                $('#vny_message').html($('#vny_message').html()+'<br>Fetching Product...');
+                var qryProducts = sforce.connection.query("SELECT Id, OpportunityId, Product2Id, Product2.Name, Quantity, UnitPrice FROM OpportunityLineItem WHERE OpportunityId='"+data.project.Opportunity+"'");
+                var recProducts = qryProducts.getArray("records");
+                if(recProducts.length > 0) {
+                    product.Name = recProducts[0].Product2.Name;
+                    product.Id = recProducts[0].Id;
+                    product.Price = Number(recProducts[0].UnitPrice);
+                    product.Quantity = recProducts[0].Quantity;
+                } else {
+                    $('#vny_message').html($('#vny_message').html()+'<br>Product not found in Opportunity.');
+                }
+                return product;
+            }
+            
+            function getCompanyInfo(token) {
+                $.ajax({
+                    url: "https://vanaya.my.id/v/getcompany",
+                    method: 'POST',
+                    crossDomain: true,
+                    xhrFields: { withCredentials:true },
+                    contentType: "application/json",
+                    data: JSON.stringify({
+                        token: token,
+                        realmId: recRealm[0].Value__c
+                    }),
+                    success: function(result){
+                        console.log('result',result);
+                    },
+                    error: function(error) {
+                        console.log('error', error);
+                    }
+                });
+            }
+            /*$.ajax({
+                url: "https://vanaya.my.id/vanaya/api_call/refresh", 
+                xhrFields: { withCredentials:true },
+                success: function(result){
+                    //if(result.error == 'Not authorized') window.location = 'https://vanaya.my.id/vanaya/connect_to_quickbooks';
+                    console.log('result',result);
+                    if(result.error == 'Not authorized') launchPopup('https://vanaya.my.id/vanaya/connect_to_quickbooks');
+                }
+            });*/
+            
+            /*function launchPopup(path) {
+                var win;
+                var checkConnect;
+                var parameters = "location=1,width=800,height=650";
+                parameters += ",left=" + (screen.width - 800) / 2 + ",top=" + (screen.height - 650) / 2;
+                
+                // Launch Popup
+                win = window.open(path, 'connectPopup', parameters);
+            }*/
+            
+                   /*if(projectStatus != 'In Progress') {
+                $('#vny_message').text('Project Status is '+projectStatus+', synchronization is only allowed when In Progress.');
+            } else {
+                $('#vny_message').text('Fetching Project...');
+                data.project = {};
+                data.project.Id = '{!Project__c.Id}';
+                data.project.Number = '{!Project__c.Name}';
+                data.project.Amount = '{!Project__c.Project_Values_New__c}';
+                
+                $('#vny_message').text('Fetching Customer...');
+                data.customer = {};
+                data.customer.Id = '{!Project__c.Customer__c}';
+                data.customer.Name = '{!Project__c.Customer__r.Name}';
+                
+                console.log(data);
+                /*var username = 'AB43hEBYfuHgjk7VXDrEjvGMMkmTA5OB2vD0XanQ9M1vhNPFmU';
+                var password = '0w05UFwo8AhXPYmSOWJLSxt37Z6VhV4SKD3CkhjP';
+                
+                var datastring = $("#vny-form").serialize();
+                $.ajax({
+                    url: "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
+                    type: 'POST',
+                    xhrFields: { withCredentials:true },
+                    contentType: 'application/x-www-form-urlencoded',
+                    dataType: "json",
+                    crossDomain: true,
+                    headers: {
+                        "Authorization": "Basic " + btoa(username + ":" + password)
+                    },
+                    data: datastring,
+                    success: function(result){
+                        //if(result.error == 'Not authorized') window.location = 'https://vanaya.my.id/vanaya/connect_to_quickbooks';
+                        console.log('result',result);
+                        alert(JSON.stringify(result));
+                        //if(result.error == 'Not authorized') launchPopup('https://vanaya.my.id/vanaya/connect_to_quickbooks');
+                    }
+                });
+                
+                
+                
+            }*/
+            
+            
+            /*console.log('project: ',projectStatus, projectType);
+            var result = sforce.connection.query("Select Name, Id, Opportunity__c from Project__c");
+            records = result.getArray("records");
+            console.log('records',records);*/
+        });
+    </script>
+</apex:page>
