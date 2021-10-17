@@ -8,8 +8,6 @@
             var data = {};
             var productsToInsert = [];
             var participantsToInsert = [];
-            var updateParticipant = [];
-            var updateCustomer = [];
             $('#vny_message').html('Fetching Project...');
             data.project = {};
             data.project.Id = '{!Project__c.Id}';
@@ -145,6 +143,7 @@
                                 account.QB_Sync_Token__c = cust.SyncToken;
                                 sforce.connection.update([account]);
                                 if(data.project.Type == 'Project') insertContact(token,cust.Id);
+                                console.log('masuk insert customer ketemu data cust '+data.customer.Name);
                                 if(data.project.Type == 'Event') insertParticipants(token,cust.Id);
                             } else {
                                 $('#vny_message').html($('#vny_message').html()+'<br>Creating Customer on Quickbooks...');
@@ -188,6 +187,7 @@
                                             account.QB_Sync_Token__c = result.Customer.SyncToken;
                                             sforce.connection.update([account]);
                                             if(data.project.Type == 'Project') insertContact(token,result.Customer.Id);
+                                            console.log('masuk insert customer ga ketemu data cust '+data.customer.Name);
                                             if(data.project.Type == 'Event') insertParticipants(token,result.Customer.Id);
                                         } else {
                                             $('#vny_message').html($('#vny_message').html()+'<br>Failed to create a Customer on Quickbooks');
@@ -206,6 +206,7 @@
                     });
                 }
                 else {
+                console.log('masuk insert customer qb ketemu '+data.customer.Name);
                     $('#vny_message').html($('#vny_message').html()+'<br>Customer already synced.');
                     if(data.project.Type == 'Project') insertContact(token,data.customer.QbId);
                     if(data.project.Type == 'Event') insertParticipants(token,data.customer.QbId);
@@ -269,6 +270,7 @@
                 var dataParticipants = [];
                 data.participants.forEach(function(record,index){
                     if(record.QbId == null) {
+                    console.log('name masuk:'+record.Name);
                         var objParticipant = {
                             bId: 'bid'+(index+1),
                             Customer: {
@@ -287,12 +289,9 @@
                         }
                         participantsToInsert.push(objParticipant);
                         
-                        var participant = new sforce.SObject("Participant__c");
-                        participant.Id = record.Id;
-                        participant.Sync_to_QB__c = true;
-                        updateParticipant.push(participant);
                     }
                 });
+                console.log('length nya:'+participantsToInsert.length);
                 if(participantsToInsert.length > 0) {
                     $('#vny_message').html($('#vny_message').html()+'<br>Creating Participants on Quickbooks...');
                     $.ajax({
@@ -314,12 +313,22 @@
                             if(result.BatchItemResponse.length > 0) {
                                 result.BatchItemResponse.forEach(function(batch){
                                     if("Customer" in batch) {
-                                        var contact = new sforce.SObject("Contact");
-                                        contact.Id = batch.Customer.Notes;
-                                        contact.QB_ID__c = batch.Customer.Id;
-                                        contact.QB_Sync_Token__c = batch.Customer.SyncToken;
-                                        sforce.connection.update([contact]);
-                                        console.log('Update contact success.');
+                                        var qname = batch.Customer.FullyQualifiedName;
+                                        console.log('result batch participants qname',qname );
+                                        if(qname.search(":") > 0){
+                                            var acc = new sforce.SObject("Account");
+                                            acc.Id = batch.Customer.Notes;
+                                            acc.QB_ID__c = batch.Customer.Id;
+                                            acc.QB_Sync_Token__c = batch.Customer.SyncToken;
+                                            sforce.connection.update([acc]);
+                                            console.log('Update Account success.');
+                                        }else{
+                                            var contact = new sforce.SObject("Contact");
+                                            contact.Id = batch.Customer.Notes;
+                                            contact.QB_ID__c = batch.Customer.Id;
+                                            contact.QB_Sync_Token__c = batch.Customer.SyncToken;
+                                            var result = sforce.connection.update([contact]);
+                                        }
                                     }
                                 });
                                 checkProduct(token,'');
@@ -332,11 +341,6 @@
                 } else {
                     $('#vny_message').html($('#vny_message').html()+'<br>All the participants already synced.');
                     checkProduct(token,'');
-                }
-                
-                if(updateParticipant.length > 0) {
-                    sforce.connection.update(updateParticipant);
-                    $('#vny_message').html($('#vny_message').html()+'<br>Participants synced ...');
                 }
             }
             
@@ -444,6 +448,7 @@
                                 });
                                 $('#vny_message').html($('#vny_message').html()+'<br>Successfully created Estimates on Quickbooks');
                                 updateProjectSynced();
+                                updateParticipantSynced();
                             }
                         },
                         error: function(error) {
@@ -451,7 +456,7 @@
                         }
                     });
                 } else {
-                    $('#vny_message').html($('#vny_message').html()+'<br>Please add Participant to the Project.');
+                    $('#vny_message').html($('#vny_message').html()+'<br>Please add Participant to the Project or All Participant are already Synced.');
                 }
             }
             
@@ -498,6 +503,7 @@
                         if("Estimate" in result) {
                             $('#vny_message').html($('#vny_message').html()+'<br>Successfully created an Estimate on Quickbooks');
                             updateProjectSynced();
+                            updateParticipantSynced();
                             /*var contact = new sforce.SObject("Contact");
                             contact.Id = data.contact.Id;
                             contact.QB_ID__c = result.Customer.Id;
@@ -519,6 +525,29 @@
                 updproj.Id = data.project.Id;
                 updproj.Synced_To_Quickbooks__c = true;
                 sforce.connection.update([updproj]);
+            }
+            
+            function updateParticipantSynced(){
+                var qryParticipants = sforce.connection.query("SELECT Id FROM Participant__c WHERE Sync_to_QB__c = FALSE AND Project__c='"+data.project.Id+"'");
+                var recParticipants = qryParticipants.getArray("records");
+                var res = [];
+                recParticipants.forEach(function(record,index){
+                    let prtcpnt = new sforce.SObject("Participant__c");
+                    prtcpnt.Id = record.Id;
+                    prtcpnt.Sync_to_QB__c = true;
+                    res.push(prtcpnt);
+                    console.log('participant id: '+record.IdParticipant);
+                });
+                
+                console.log('res lengthnya: '+res.length);
+                if(res.length > 0){
+                    var result = sforce.connection.update(res);
+                    if (result[0].success=='false') {
+                       console.log(result[0].errors.message);
+                    } else {
+                       console.log('success update participant');
+                    }
+                }
             }
             
             function checkProduct(token,customerId) {
@@ -609,6 +638,7 @@
                     participant.CompanyParticipant = record.Company_Participant__c;
                     participant.Address = {};
                     participant.Amount = record.Amount__c;
+                    participant.IdParticipant = record.id;
                     participants.push(participant);
                 });
                 console.log('participants',participants);
